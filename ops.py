@@ -553,19 +553,21 @@ def minibatch_stddev_layer(x, group_size=4, num_new_features=1):
 # Etc
 ##################################################################################
 
-def get_style_model():
-    model = VGG16(weights='imagenet', include_top=True)
+def get_style_model(ifsave=True):
+    model = VGG16(weights='imagenet', include_top=False)
     conv3_3_layer = model.get_layer('block3_conv3')
     model_conv3_3 = tf.keras.Model(inputs=model.input, outputs=conv3_3_layer.output)
+    model_conv3_3.save('./checkpoint/vgg_style.h5') if ifsave else None
     return model_conv3_3
 
-def get_perceptual_model():
-    model = VGG16(weights='imagenet', include_top=True)
+def get_perceptual_model(ifsave=True):
+    model = VGG16(weights='imagenet', include_top=False)
     conv1_1_layer = model.get_layer('block1_conv1')
-    conv1_2_layer = model.get_layer('block1_conv2')
-    conv2_2_layer = model.get_layer('block2_conv2')
-    conv3_3_layer = model.get_layer('block3_conv3')
+    conv1_2_layer = model.get_layer('block2_conv2')
+    conv2_2_layer = model.get_layer('block3_conv3')
+    conv3_3_layer = model.get_layer('block4_conv3')
     model_conv2_2 = tf.keras.Model(inputs=model.input, outputs=[conv1_1_layer.output, conv2_2_layer.output, conv1_2_layer.output, conv3_3_layer.output])
+    model_conv2_2.save('./checkpoint/vgg_perceptual.h5') if ifsave else None
     return model_conv2_2
 
 def Cal_style_loss(real_y, fake_y, Ms, style_model, Lambda=1):
@@ -577,7 +579,7 @@ def Cal_style_loss(real_y, fake_y, Ms, style_model, Lambda=1):
 
     Ms = cv2.resize(Ms, (real_style.shape[1], real_style.shape[2]))
     Ms = tf.expand_dims(tf.expand_dims(tf.convert_to_tensor(Ms), axis=0), axis=-1)
-    return cal_loss(tf.math.multiply(real_style, Ms), tf.math.multiply(fake_style, Ms))
+    return Lambda * cal_loss(tf.math.multiply(real_style, Ms), tf.math.multiply(fake_style, Ms))
 
 def Cal_percep_loss(real_x, fake_x, Mp, percep_model, Lambda=1):
     real_x = tf.expand_dims(tf.image.resize(real_x, [224, 224]), axis=0)
@@ -591,12 +593,10 @@ def Cal_percep_loss(real_x, fake_x, Mp, percep_model, Lambda=1):
         Mp_cur = tf.expand_dims(tf.expand_dims(tf.convert_to_tensor(Mp_cur), axis=0), axis=-1)
         percep_loss += cal_loss(tf.math.multiply(real_percep, Mp_cur), tf.math.multiply(fake_percep, Mp_cur))
 
-    return percep_loss
+    return Lambda * percep_loss
 
 def cal_loss(y, y_):
-    return tf.reduce_mean(tf.pow(y_- y,2))
-
-
+    return tf.reduce_mean(tf.square(y- y_))
 
 def filter_trainable_variables(res):
     res_in_focus = [2 ** r for r in range(int(np.log2(res)), 1, -1)]

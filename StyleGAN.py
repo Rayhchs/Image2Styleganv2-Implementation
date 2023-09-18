@@ -13,10 +13,8 @@ class StyleGAN(object):
         self.phase = args.phase
         self.progressive = args.progressive
         self.model_name = "StyleGAN"
-        self.gpu_id = args.gpu_id
         self.sess = sess
         self.dataset_name = args.dataset
-        self.data_folder = args.test_folder
         self.checkpoint_dir = args.checkpoint_dir
         self.result_dir = args.result_dir
 
@@ -36,7 +34,7 @@ class StyleGAN(object):
             self.featuremaps = [self.featuremaps[-1]]
             self.start_res = self.resolutions[-1]
 
-        self.gpu_num = 1#args.gpu_num
+        self.gpu_num = 1
 
         self.z_dim = 512
         self.w_dim = 512
@@ -68,23 +66,6 @@ class StyleGAN(object):
 
         self.dataset = self.dataset_name
 
-        if args.phase.lower() != 'augmentation':
-            print()
-
-            print("##### Information #####")
-            print("# dataset : ", self.dataset_name)
-            print("# gpu : ", self.gpu_num)
-            print("# batch_size in train phase : ", self.batch_sizes)
-            print("# batch_size in test phase : ", self.batch_size)
-
-            print("# start resolution : ", self.start_res)
-            print("# target resolution : ", self.img_size)
-            print("# iteration per resolution : ", self.iteration)
-
-            print("# progressive training : ", self.progressive)
-            print("# spectral normalization : ", self.sn)
-
-            print()
 
     ##################################################################################
     # Generator
@@ -442,13 +423,21 @@ class StyleGAN(object):
             return False, 0
 
 
-    # Find optimized w space (image2stylegan++)
-    def find_z(self, img_x, img_y, M, lambdax=1, lambday=1, vgg_size=128, epoch=1000):
+    # Find optimized w+ space and noise space (image2stylegan & image2stylegan++)
+    def find_z(self, img_x, img_y, M, args):
+
+        # Config
+        lambda_mse = args.lambda_mse
+        lambda_p = args.lambda_p
+        lambda_mse1 = args.lambda_mse1
+        lambda_mse2 = args.lambda_mse2
+        epoch_w = args.epoch_w
+        epoch_n = args.epoch_n
 
         # Load model and check
         could_load, _ = self.load(self.checkpoint_dir)
-        # if not could_load:
-        #     sys.exit(" [*] Checkpoint Load Failed")
+        style_model = get_style_model()
+        percep_model = get_perceptual_model()
 
         x = tf.cast(np.array(img_x), tf.float32)
         y = tf.cast(np.array(img_y), tf.float32)
@@ -458,86 +447,120 @@ class StyleGAN(object):
         featuremaps = featuremap_list(self.img_size)
         n_broadcast = len(resolutions) * 2
 
+        if self.phase.lower() == 'inpainting':
+            M_ = cv2.GaussianBlur(M, (701, 701), 0)
+            M_ = np.expand_dims(M_, -1)
+
         with tf.variable_scope('generator', reuse=tf.AUTO_REUSE):
 
-            # Create style and perceptual model
-            style_model = get_style_model()
-            percep_model = get_perceptual_model()#[get_vgg_conv1_1(), get_vgg_conv1_2(), get_vgg_conv2_2(), get_vgg_conv3_3()]
-
-            # Random generate 20000 z codes. Passing through g_mapping, all of the w codes are averaged into one
-            z_all = tf.random.normal(shape=[10000, self.z_dim])
+            # Random generate 10000 z codes. Passing through g_mapping, all of the w codes are averaged into one
+            z_all = tf.random.uniform(shape=[10000, self.z_dim], minval=-1, maxval=1)
             w = tf.expand_dims(tf.reduce_mean(self.g_mapping(z_all, n_broadcast), axis=0), axis=0)
             w = tf.reshape(w, [1, 18, self.z_dim])
 
-            # initial w code
-            w_init_x = tf.Variable(w, name='project_w_x')
-            w_init_y = tf.Variable(w, name='project_w_y')
+            w_stack = []
+            if self.phase.lower() == 'inpainting':
+                for i in range(18):
+                    if i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 17]:
+                        constant_w = tf.Variable(w[0, i, :], name=f'project_w_{i}')
+                        w_stack.append(constant_w)
+                    else:
+                        variable_w = tf.Variable(w[0, i, :], trainable=False, name=f'constant_{i}')
+                        w_stack.append(variable_w)
+                w_init_x = tf.expand_dims(tf.stack(w_stack), axis=0)
+
+            else:
+                w_init_x = tf.Variable(w, name='project_w')
 
             # Find noise space
             x_noise_list = []
             x_noise_list_ = []
-            y_noise_list = []
-            y_noise_list_ = []
             for i in range(len(resolutions)):
-                x_noise_list.append(tf.Variable(tf.random_normal([1, resolutions[i], resolutions[i], 1]), name=f'xproject_noise{i}'))
-                x_noise_list_.append(tf.Variable(tf.random_normal([1, resolutions[i], resolutions[i], 1]), name=f'xproject_noise_{i}'))
-                y_noise_list.append(tf.Variable(tf.random_normal([1, resolutions[i], resolutions[i], 1]), name=f'yproject_noise{i}'))
-                y_noise_list_.append(tf.Variable(tf.random_normal([1, resolutions[i], resolutions[i], 1]), name=f'yproject_noise_{i}'))
+                x_noise_list.append(tf.Variable(tf.random.normal([1, resolutions[i], resolutions[i], 1]), name=f'project_noise{i}'))
+                x_noise_list_.append(tf.Variable(tf.random.normal([1, resolutions[i], resolutions[i], 1]), name=f'project_noise_{i}'))
 
             alpha = tf.constant(0.0, dtype=tf.float32, shape=[])
 
             # Generated image
-            x_fake = self.g_synthesis(w_init_x, alpha, resolutions, featuremaps, x_noise_list, x_noise_list_)[0]
-            y_fake = self.g_synthesis(w_init_y, alpha, resolutions, featuremaps, y_noise_list, y_noise_list_)[0]
+            x_fake_Wl = self.g_synthesis(w_init_x, alpha, resolutions, featuremaps, x_noise_list, x_noise_list_)[0]
+            y_fake_Wl = self.g_synthesis(w_init_x, alpha, resolutions, featuremaps, x_noise_list, x_noise_list_)[0]
+
+            if self.phase.lower() == 'inpainting':
+                noise_list = []
+                noise_list_ = []
+                for i in range(len(resolutions)):
+                    noise_list.append(tf.Variable(tf.random.normal([1, resolutions[i], resolutions[i], 1]), trainable=False, name=f'constant_noise{i}'))
+                    noise_list_.append(tf.Variable(tf.random.normal([1, resolutions[i], resolutions[i], 1]), trainable=False, name=f'constant_noise{i}'))
+                x_fake = self.g_synthesis(w_init_x, alpha, resolutions, featuremaps, noise_list, noise_list_)[0]
 
         # Variable: w+ space and noise space
         vars_w = [var for var in tf.trainable_variables() if 'project_w' in var.name]
         vars_n = [var for var in tf.trainable_variables() if 'project_noise' in var.name]
 
         # Lots of losses
-        mse_loss_x = lambdax * self.cal_loss(x, x_fake * M)
-        mse_loss_y = lambday * self.cal_loss(y, y_fake * (1-M))
-        style_loss = Cal_style_loss(y, y_fake, M, style_model, Lambda=1)
-        percep_loss = Cal_percep_loss(x, x_fake, M, percep_model, Lambda=1)
-        loss = mse_loss_x + mse_loss_y + style_loss + percep_loss
+        if self.phase.lower() == 'reconstruction':
+            mse_loss_x = lambda_mse * cal_loss(x, x_fake_Wl * M)
+            percep_loss = Cal_percep_loss(x, x_fake_Wl, M, percep_model, Lambda=lambda_p)
+            mse_loss_x_n = lambda_mse * cal_loss(x, x_fake_Wl*M)
+            loss_Wl = mse_loss_x + percep_loss
+            loss_Mkn = mse_loss_x_n
+
+        elif self.phase.lower() == 'crossover':
+            mse_loss_x = lambda_mse * cal_loss(x*M, x_fake_Wl*M)
+            mse_loss_y = lambda_mse * cal_loss(y*(1-M), y_fake_Wl*(1-M))
+            style_loss = lambda_p * Cal_style_loss(y, y_fake_Wl, (1-M), style_model)
+            percep_loss = lambda_p * Cal_percep_loss(x, x_fake_Wl, M, percep_model)
+            mse_loss_x_n = lambda_mse1 * cal_loss(x*M, x_fake_Wl*M)
+            mse_loss_y_n = lambda_mse2 * cal_loss(y*(1-M), y_fake_Wl*(1-M))
+            loss_Wl = mse_loss_x + mse_loss_y + style_loss + percep_loss
+            loss_Mkn = mse_loss_x_n + mse_loss_y_n
+
+        elif self.phase.lower() == 'inpainting':
+            mse_loss_x = lambda_mse * cal_loss(x*M, x_fake_Wl*M)
+            percep_loss = lambda_p * Cal_percep_loss(x, x_fake_Wl, M, percep_model)
+            mse_loss_x_n = lambda_mse1 * cal_loss(x*M_, x_fake_Wl*M_)
+            mse_loss_y_n = lambda_mse2 * cal_loss(x_fake*(1-M_), x_fake_Wl*(1-M_))
+            loss_Wl = mse_loss_x + percep_loss
+            loss_Mkn = mse_loss_x_n + mse_loss_y_n
+
+        elif self.phase.lower() == 'style_transfer':
+            mse_loss_x = lambda_mse * cal_loss(x, x_fake_Wl)
+            percep_loss_x = lambda_p * Cal_percep_loss(x, x_fake_Wl, M, percep_model)
+            loss_Wl = mse_loss_x + percep_loss_x
+            loss_Mkn = loss_Wl
 
         # Learning rate (default=0.01)
-        optimizer = tf.train.AdamOptimizer(learning_rate=0.01)
-        opt = optimizer.minimize(loss, var_list=[vars_w, vars_n])
+        optimizer1 = tf.train.AdamOptimizer(learning_rate=0.01)
+        optimizer2 = tf.train.AdamOptimizer(learning_rate=5)
+        opt_Wl = optimizer1.minimize(loss_Wl, var_list=[vars_w])
+        opt_Mkn = optimizer2.minimize(loss_Mkn, var_list=[vars_n])
 
         tf.global_variables_initializer().run()
+        percep_model.load_weights('./checkpoint/vgg_perceptual.h5')
+        style_model.load_weights('./checkpoint/vgg_style.h5')
         could_load, _ = self.load(self.checkpoint_dir)
 
         # Optimization
-        for i in tqdm(range(epoch)):
-            with tf.xla.experimental.jit_scope():
-                self.sess.run([opt])
+        if self.phase.lower() != 'style_transfer':
+            for i in tqdm(range(epoch_w)):
+                self.sess.run([opt_Wl])
+            for i in tqdm(range(epoch_n)):
+                self.sess.run([opt_Mkn])
+        else:
+            for i in tqdm(range(epoch_w)):
+                self.sess.run([opt_Wl])
 
         # Get optimized latent code
-        w_x, x_opt_noise_fake, x_opt_noise_fake_, w_y, y_opt_noise_fake, y_opt_noise_fake_ = self.sess.run([w_init_x,
-                                                                                                            x_noise_list,
-                                                                                                            x_noise_list_,
-                                                                                                            w_init_y,
-                                                                                                            y_noise_list, 
-                                                                                                            y_noise_list_])
-
+        w_x, x_opt_noise_fake, x_opt_noise_fake_ = self.sess.run([w_init_x,
+                                                                x_noise_list,
+                                                                x_noise_list_])
         x_opt_noise = []
         x_opt_noise_ = []
-        y_opt_noise = []
-        y_opt_noise_ = []
         for i in range(len(resolutions)):
             x_opt_noise.append(x_opt_noise_fake[i])
             x_opt_noise_.append(x_opt_noise_fake_[i])
-            y_opt_noise.append(y_opt_noise_fake[i])
-            y_opt_noise_.append(y_opt_noise_fake_[i])
-
 
         return w_x, x_opt_noise, x_opt_noise_
-
-
-    @tf.function
-    def cal_loss(self, y, y_):
-        return tf.reduce_mean(tf.pow(y_- y,2))
 
 
     def reconstruction(self, latent_code, opt_noise, opt_noise_):
@@ -552,51 +575,3 @@ class StyleGAN(object):
             fake_image = self.g_synthesis(np.array(latent_code), alpha, resolutions, featuremaps, opt_noise, opt_noise_)
         sample = self.sess.run(fake_image)
         return sample[0, :, :, :]
-
-
-    def pose_transition(self, latent_code, latent_code_flip, opt_noise, opt_noise_flip, opt_noise_, opt_noise_flip_, name, interpolate_num=10):
-
-        # Some configuration
-        resolutions = resolution_list(self.img_size)
-        featuremaps = featuremap_list(self.img_size)
-        alpha = tf.constant(0.0, dtype=tf.float32, shape=[])
-
-        # Interpolate latent code and noise space
-        new_latents = []
-        names = []
-        for j in range(1, interpolate_num+1):
-
-            r1 = j/interpolate_num
-            r2 = 1 - (j/interpolate_num)
-            new_latent = (latent_code * r1) + (latent_code_flip * r2)
-            new_latents.extend(new_latent)
-            for n in name:
-                names.append('{}_p{}.jpg'.format(n, j))
-
-        new_noise = []
-        new_noise_ = []
-        for k in range(len(opt_noise)):
-            temp = []
-            temp_ = []
-            for j in range(1, interpolate_num+1):
-
-                r1 = j/interpolate_num
-                r2 = 1 - (j/interpolate_num)
-                temp.extend((opt_noise[k] * r1) + (opt_noise_flip[k] * r2))
-                temp_.extend((opt_noise_[k] * r1) + (opt_noise_flip_[k] * r2))
-            new_noise.append(np.array(temp))
-            new_noise_.append(np.array(temp_))
-
-        #tf.global_variables_initializer().run()
-        #could_load, checkpoint_counter = self.load(self.checkpoint_dir)
-
-        with tf.variable_scope('generator', reuse=tf.AUTO_REUSE):
-            fake_images = self.g_synthesis(np.array(new_latents), alpha, resolutions, featuremaps, new_noise, new_noise_)
-        samples = self.sess.run(fake_images)
-        # Filter out some inappropriate images using stylegan discriminator
-        #score = self.sess.run(self.score, feed_dict={self.output_img: samples})
-
-        # -0.25 is experience value
-        for k in range(len(names)):
-            if True:#score[k,:] > -0.25:
-                save_images(samples[k:k+1, :, :, :], [1, 1], names[k])
