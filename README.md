@@ -25,9 +25,9 @@ This repository converts [NVlabs](https://github.com/NVlabs/stylegan) pretrained
 
 ## Usage
 
-	```shell script
-	sh run.sh
-	```
+```shell script
+sh run.sh
+```
 
 That's it. Image results will be saved to `./result`.
 
@@ -49,7 +49,7 @@ This repository uses totally different lambda value from papers. If you are inte
 ## Results
 
 | Phase | Master image | Slave image | Transformed image |
-| ------------- | ------------- | ------------- | ------------- |
+| ------------------------------- | ------------------------------- | ------------------------------- | ------------------------------- |
 | Reconstruction | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/dataset/obama.jpg" width="250"> | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/dataset/obama.jpg" width="250"> | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/results/reconstruction_obama.jpg" width="250">|
 | Reconstruction | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/dataset/Ryan.jpg" width="250"> | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/dataset/Ryan.jpg" width="250"> | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/results/reconstruction_Ryan.jpg" width="250">|
 | Crossover, mask=[350, 650, 650, 850] | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/dataset/obama.jpg" width="250"> | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/dataset/Ryan" width="250"> | <img src="https://github.com/Rayhchs/Image2Styleganv2-Implmentation/blob/main/results/crossover_obama.jpg" width="250">|
